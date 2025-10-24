@@ -95,6 +95,13 @@
           <input id="h" type="number" min="1" step="1" value="160">
         </div>
         <div class="tool">
+          <label>拡大して使用</label>
+          <div style="display:flex; gap:12px; align-items:center; padding-top:2px">
+            <label style="display:flex; align-items:center; gap:6px; font-size:14px;"><input id="scale2" type="checkbox"> 2倍</label>
+            <label style="display:flex; align-items:center; gap:6px; font-size:14px;"><input id="scale4" type="checkbox"> 4倍</label>
+          </div>
+        </div>
+        <div class="tool">
           <button id="download" class="btn">切り取ってダウンロード</button>
         </div>
         <div class="tool">
@@ -124,6 +131,7 @@
 
 <script>
 (function(){
+  // ==== Elements ====
   const fileInput = document.getElementById('file');
   const img = document.getElementById('img');
   const stage = document.getElementById('stage');
@@ -133,30 +141,40 @@
   const hInput = document.getElementById('h');
   const downloadBtn = document.getElementById('download');
   const centerBtn = document.getElementById('centerBtn');
+  const scale2 = document.getElementById('scale2');
+  const scale4 = document.getElementById('scale4');
 
-  let naturalW = 0, naturalH = 0;      // 原寸
-  let dispW = 0, dispH = 0;             // 表示サイズ
-  let scaleX = 1, scaleY = 1;           // 表示→原寸への係数 (natural = display * scale)
+  // ==== State ====
+  let objectURL = '';
+  const baseImage = new Image(); // 元画像（非表示）
+  let origNaturalW = 0, origNaturalH = 0; // 元画像の原寸
 
-  let cropW_px = 160, cropH_px = 160;   // 出力ピクセル（原寸）
-  let cropDX = 0, cropDY = 0;           // 表示座標系での矩形左上
+  // 使用中の原寸（拡大適用後）
+  let naturalW = 0, naturalH = 0;
+  let upCanvas = null; // 2x/4x のソース
+  let scaleFactor = 1; // 1 | 2 | 4
 
-  function updateBadge(){
-    badge.textContent = `${cropW_px} × ${cropH_px}`;
-  }
+  // 表示サイズ（img要素の描画サイズ）とスケール
+  let dispW = 0, dispH = 0;
+  let scaleX = 1, scaleY = 1; // natural = display * scale
+
+  // 出力ピクセル数（ユーザー入力）
+  let cropW_px = 160, cropH_px = 160;
+  // 表示座標系での矩形左上
+  let cropDX = 0, cropDY = 0;
+
+  // ==== UI helpers ====
+  function updateBadge(){ badge.textContent = `${cropW_px} × ${cropH_px}`; }
 
   function updateScales(){
-    // 表示サイズは画像のクライアントサイズ
     dispW = img.clientWidth; dispH = img.clientHeight;
     if (!dispW || !dispH) return;
-    scaleX = naturalW / dispW; // natural = display * scale
+    scaleX = naturalW / dispW;
     scaleY = naturalH / dispH;
-    // 入力ピクセルから表示上の矩形サイズに換算
-    const dw = cropW_px / scaleX;
-    const dh = cropH_px / scaleY;
+    const dw = cropW_px / scaleX; // 表示上の幅
+    const dh = cropH_px / scaleY; // 表示上の高
     crop.style.width = dw + 'px';
     crop.style.height = dh + 'px';
-    // 表示境界内に収める
     clampRect();
   }
 
@@ -177,23 +195,59 @@
     clampRect();
   }
 
+  // ==== Image loading & scaling ====
+  baseImage.onload = function(){
+    origNaturalW = baseImage.naturalWidth;
+    origNaturalH = baseImage.naturalHeight;
+    rebuildDisplaySource();
+  };
+
   function loadFile(file){
-    const url = URL.createObjectURL(file);
-    img.onload = () => {
-      naturalW = img.naturalWidth; naturalH = img.naturalHeight;
-      img.hidden = false; crop.hidden = false;
-      // 少し待ってからサイズ取得（レイアウト確定）
-      requestAnimationFrame(()=>{ updateScales(); centerRect(); });
-    };
-    img.src = url;
+    // 古いURL掃除
+    if (objectURL) URL.revokeObjectURL(objectURL);
+    objectURL = URL.createObjectURL(file);
+    baseImage.src = objectURL;
   }
 
+  function rebuildDisplaySource(){
+    if (!origNaturalW || !origNaturalH) return;
+    if (scaleFactor === 1){
+      upCanvas = null;
+      naturalW = origNaturalW; naturalH = origNaturalH;
+      img.onload = function(){ img.hidden = false; crop.hidden = false; requestAnimationFrame(()=>{ updateScales(); centerRect(); }); };
+      img.src = objectURL; // 元サイズのまま表示
+    } else {
+      const cw = Math.max(1, Math.round(origNaturalW * scaleFactor));
+      const ch = Math.max(1, Math.round(origNaturalH * scaleFactor));
+      const cvs = document.createElement('canvas');
+      cvs.width = cw; cvs.height = ch;
+      const c = cvs.getContext('2d');
+      c.imageSmoothingEnabled = true;
+      c.imageSmoothingQuality = 'high';
+      c.drawImage(baseImage, 0, 0, origNaturalW, origNaturalH, 0, 0, cw, ch);
+      upCanvas = cvs; naturalW = cw; naturalH = ch;
+      img.onload = function(){ img.hidden = false; crop.hidden = false; requestAnimationFrame(()=>{ updateScales(); centerRect(); }); };
+      img.src = cvs.toDataURL('image/png'); // 拡大版を目で見て操作
+    }
+  }
+
+  function applyScaleOption(){
+    const prev = scaleFactor;
+    if (scale4 && scale4.checked){ scaleFactor = 4; if (scale2) scale2.checked = false; }
+    else if (scale2 && scale2.checked){ scaleFactor = 2; if (scale4) scale4.checked = false; }
+    else { scaleFactor = 1; }
+
+    if (origNaturalW && prev !== scaleFactor){
+      rebuildDisplaySource();
+    }
+  }
+
+  // ==== Event wiring ====
   fileInput.addEventListener('change', (e)=>{
     const f = e.target.files && e.target.files[0];
     if (f) loadFile(f);
   });
 
-  // 入力が変わったら矩形サイズを更新
   function onDimChange(){
     const wv = Math.max(1, Math.floor(+wInput.value || 1));
     const hv = Math.max(1, Math.floor(+hInput.value || 1));
@@ -202,7 +256,7 @@
   wInput.addEventListener('input', onDimChange);
   hInput.addEventListener('input', onDimChange);
 
-  // ドラッグで移動（ポインター統一）
+  // ドラッグ移動（Pointer API）
   let dragging = false; let startX=0, startY=0, startDX=0, startDY=0;
   crop.addEventListener('pointerdown', (ev)=>{
     if (img.hidden) return;
@@ -214,38 +268,42 @@
     const dx = ev.clientX - startX; const dy = ev.clientY - startY;
     cropDX = startDX + dx; cropDY = startDY + dy; clampRect();
   });
-  const endDrag = (ev)=>{ dragging = false; try{ crop.releasePointerCapture(ev.pointerId); }catch(_){} };
+  function endDrag(ev){ if (!dragging) return; dragging = false; try{ crop.releasePointerCapture(ev.pointerId); }catch(_){ } }
   crop.addEventListener('pointerup', endDrag);
   crop.addEventListener('pointercancel', endDrag);
 
-  // 矢印キーで移動
-  stage.tabIndex = 0; // フォーカス可能に
+  // キー移動
+  stage.tabIndex = 0;
   stage.addEventListener('keydown', (e)=>{
     if (img.hidden) return;
     const step = e.shiftKey ? 10 : 1;
-    let changed = true;
-    if (e.key === 'ArrowLeft') cropDX -= step;
-    else if (e.key === 'ArrowRight') cropDX += step;
-    else if (e.key === 'ArrowUp') cropDY -= step;
-    else if (e.key === 'ArrowDown') cropDY += step;
-    else changed = false;
-    if (changed){ e.preventDefault(); clampRect(); }
+    let used = true;
+    switch(e.key){
+      case 'ArrowLeft': cropDX -= step; break;
+      case 'ArrowRight': cropDX += step; break;
+      case 'ArrowUp': cropDY -= step; break;
+      case 'ArrowDown': cropDY += step; break;
+      default: used = false;
+    }
+    if (used){ e.preventDefault(); clampRect(); }
   });
 
-  // リサイズ時もスケール再計算
+  // リサイズ
   new ResizeObserver(()=>{ if (!img.hidden) updateScales(); }).observe(stage);
   window.addEventListener('resize', ()=>{ if (!img.hidden) updateScales(); });
 
-  // ダウンロード処理
+  // 2倍/4倍
+  if (scale2) scale2.addEventListener('change', applyScaleOption);
+  if (scale4) scale4.addEventListener('change', applyScaleOption);
+
+  // ダウンロード
   downloadBtn.addEventListener('click', ()=>{
     if (img.hidden){ alert('先に画像を選択してください。'); return; }
-    // 表示→原寸へ変換
     const sx = Math.round(cropDX * scaleX);
     const sy = Math.round(cropDY * scaleY);
     const sw = Math.round(cropW_px);
     const sh = Math.round(cropH_px);
 
-    // 範囲を原寸内にクランプ
     const maxX = Math.max(0, naturalW - sw);
     const maxY = Math.max(0, naturalH - sh);
     const sxc = Math.max(0, Math.min(sx, maxX));
@@ -256,7 +314,8 @@
     const ctx = cvs.getContext('2d');
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(img, sxc, syc, sw, sh, 0, 0, sw, sh);
+    const source = upCanvas || baseImage;
+    ctx.drawImage(source, sxc, syc, sw, sh, 0, 0, sw, sh);
 
     const name = `crop_${sw}x${sh}.png`;
     cvs.toBlob((blob)=>{
@@ -267,10 +326,7 @@
   });
 
   centerBtn.addEventListener('click', ()=>{ if (!img.hidden){ centerRect(); } });
-
-  // 画像クリックで矩形へフォーカス
   stage.addEventListener('click', ()=>{ stage.focus(); });
-
 })();
 </script>
 </body>
